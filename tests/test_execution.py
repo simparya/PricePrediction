@@ -1,4 +1,5 @@
 import unittest
+from contextlib import closing
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 import pandas as pd
@@ -35,7 +36,7 @@ class ExecutionTests(unittest.TestCase):
             target=Path(tmp)/'audit.db'
             with patch('priceprediction.execution.TradingClient',return_value=self.client):
                 execute(decision,'k','s',100.,audit_path=target)
-            with sqlite3.connect(target) as db:
+            with closing(sqlite3.connect(target)) as db, db:
                 record=db.execute('SELECT qty,alpaca_order_id,status FROM trades').fetchone()
             self.assertEqual(record,(10,'paper-order-123','SUBMITTED'))
 
