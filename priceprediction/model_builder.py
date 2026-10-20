@@ -8,13 +8,15 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, brier_score_loss
 from xgboost import XGBClassifier
-from strategy import FEATURES, prepare
+from .strategy import FEATURES, prepare
+from .quant import QUANT_FEATURES, fit_garch, garch_variance, hac_mean_interval, block_bootstrap_mean_interval
 
-ROOT=Path(__file__).resolve().parent
+from .paths import DATA_DIR, ARTIFACTS_DIR
 
 
 def probability(bundle, frame):
-    raw=np.clip(bundle['model'].predict_proba(frame[FEATURES])[:,1],1e-6,1-1e-6)
+    features=bundle.get('features',FEATURES)
+    raw=np.clip(bundle['model'].predict_proba(frame[features])[:,1],1e-6,1-1e-6)
     return bundle['calibrator'].predict_proba(np.log(raw/(1-raw)).reshape(-1,1))[:,1]
 
 
@@ -37,15 +39,18 @@ def threshold_search(y, p, regime, minimum=25):
     return best,candidates
 
 
-def build(data, output, horizon=5):
+def build(data, output, horizon=5, quant=False):
     if horizon<1: raise ValueError('Horizon must be positive')
+    if quant and Path(output).resolve()==(ARTIFACTS_DIR/'strategy.joblib').resolve():
+        raise ValueError('Quant research cannot overwrite the active paper model')
     raw=pd.read_csv(data,index_col=0,parse_dates=True).sort_index()
     full=prepare(raw)
     # Future prices are used ONLY as training/evaluation labels.
     future=full.close.shift(-horizon)
     full['label']=(future>full.close).astype(int)
     full.loc[future.isna(),'label']=np.nan
-    d=full.dropna(subset=FEATURES+['label']).copy()
+    features=FEATURES+QUANT_FEATURES if quant else FEATURES
+    d=full.dropna(subset=features+['label']).copy()
     n=len(d)
     a,b,c=int(n*.5),int(n*.7),int(n*.85)
     if min(a-horizon,b-a-horizon,c-b-horizon,n-c)<40:
@@ -54,10 +59,10 @@ def build(data, output, horizon=5):
     model=XGBClassifier(n_estimators=150,max_depth=3,learning_rate=.03,
                         subsample=.8,colsample_bytree=.8,reg_lambda=5,
                         random_state=42,n_jobs=2)
-    model.fit(train[FEATURES],train.label)
-    p=np.clip(model.predict_proba(cal[FEATURES])[:,1],1e-6,1-1e-6)
+    model.fit(train[features],train.label)
+    p=np.clip(model.predict_proba(cal[features])[:,1],1e-6,1-1e-6)
     calibrator=LogisticRegression(C=1,random_state=42).fit(np.log(p/(1-p)).reshape(-1,1),cal.label)
-    bundle={'model':model,'calibrator':calibrator,'features':FEATURES,'horizon':horizon,
+    bundle={'model':model,'calibrator':calibrator,'features':features,'horizon':horizon,'quant_enabled':bool(quant),
             'test_start':str(test.index[0]), 'threshold':1., 'enabled':False}
     pv=probability(bundle,val)
     best,candidates=threshold_search(val.label.to_numpy(),pv,val.regime.to_numpy())
@@ -85,6 +90,26 @@ def build(data, output, horizon=5):
                           'Cached OHLCV adjustment and timestamp provenance are not verified.',
                           'No claim of improved future accuracy; test returns exclude funding/borrow fees.',
                           'Black-Scholes uses historical volatility, zero rate/dividend; no market option quotes.']}
+    if quant:
+        # These scores use every test timestamp; HAC/bootstrap retain temporal order.
+        calibrated_errors=(pt-test.label.to_numpy())**2
+        baseline_errors=(bp-test.label.to_numpy())**2
+        improvement=baseline_errors-calibrated_errors
+        report['quant_research']={'features':QUANT_FEATURES,
+            'brier_improvement_vs_price_baseline_hac':hac_mean_interval(improvement,lags=horizon),
+            'brier_improvement_vs_price_baseline_block_bootstrap':block_bootstrap_mean_interval(improvement,block=horizon),
+            'test_accuracy_block_bootstrap':block_bootstrap_mean_interval(((pt>=.5)==test.label.to_numpy()).astype(float),block=horizon),
+            'garch_fit_scope':'Training returns only; parameters frozen for later volatility updates',
+            'active_paper_model_replaced':False,
+            'test_reuse_warning':'This historical holdout has been inspected before. Results are exploratory; collect new forward data.'}
+        try:
+            parameters=fit_garch(train.log_return.to_numpy())
+            bundle['garch_parameters']=parameters
+            _,next_variance=garch_variance(d.log_return.to_numpy(),parameters)
+            report['quant_research']['garch11']={'parameters':parameters,'next_daily_volatility':float(np.sqrt(next_variance)),
+                'boundary_fit_warning':bool(parameters['alpha']<1e-6 or parameters['beta']>.997 or parameters['alpha']+parameters['beta']>.9985)}
+        except ValueError as error:
+            report['quant_research']['garch11']={'unavailable':str(error)}
     output=Path(output)
     output.parent.mkdir(parents=True,exist_ok=True)
     joblib.dump(bundle,output)
@@ -95,8 +120,12 @@ def build(data, output, horizon=5):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--data',type=Path,default=ROOT/'NVDA_historical_features.csv')
-    parser.add_argument('--output',type=Path,default=ROOT/'artifacts/strategy.joblib')
+    parser.add_argument('--data',type=Path,default=DATA_DIR/'NVDA_historical_features.csv')
+    parser.add_argument('--output',type=Path,help='Default: separate research bundle with --quant; active bundle otherwise')
+    parser.add_argument('--quant',action='store_true',help='Train an isolated candidate using public quant features')
     parser.add_argument('--horizon',type=int,default=5)
     args=parser.parse_args()
-    build(args.data,args.output,args.horizon)
+    output=args.output or (ARTIFACTS_DIR/'research/strategy.joblib' if args.quant else ARTIFACTS_DIR/'strategy.joblib')
+    if args.quant and output.resolve()==(ARTIFACTS_DIR/'strategy.joblib').resolve():
+        parser.error('--quant cannot overwrite the active paper model; use a separate output')
+    build(args.data,output,args.horizon,quant=args.quant)

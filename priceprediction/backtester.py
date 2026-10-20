@@ -6,16 +6,16 @@ import joblib
 import numpy as np
 import pandas as pd
 from backtesting import Backtest, Strategy
-from strategy import FEATURES, prepare, plan
-from model_builder import probability
+from .strategy import FEATURES, prepare, plan
+from .model_builder import probability
 
-ROOT=Path(__file__).resolve().parent
+from .paths import DATA_DIR, ARTIFACTS_DIR
 
 
 def run(data, bundle_path, output):
     bundle=joblib.load(bundle_path)  # Load only locally trained/trusted artifacts.
     d=prepare(pd.read_csv(data,index_col=0,parse_dates=True).sort_index())
-    valid=d[FEATURES].notna().all(axis=1)
+    valid=d[bundle.get('features',FEATURES)].notna().all(axis=1)
     d['probability']=np.nan
     d.loc[valid,'probability']=probability(bundle,d.loc[valid])
     # Backtesting engine receives warmup too, but may trade only after test_start.
@@ -37,7 +37,7 @@ def run(data, bundle_path, output):
             self.entry_bar=None
             if not bundle['enabled'] or self.data.index[-1]<test_start or i>last_entry or not np.isfinite(self.data.probability[-1]):
                 return
-            decision=plan(d.iloc[:i+1],float(self.data.probability[-1]),bundle['threshold'],float(self.equity),horizon)
+            decision=plan(d.iloc[:i+1],float(self.data.probability[-1]),bundle['threshold'],float(self.equity),horizon,quant_risk=bundle.get('quant_enabled',False))
             self.decisions.append(decision.to_dict())
             if decision.action=='WAIT': return
             # Next-open market execution can gap beyond the planned risk budget.
@@ -69,8 +69,8 @@ def run(data, bundle_path, output):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--data',type=Path,default=ROOT/'NVDA_historical_features.csv')
-    p.add_argument('--bundle',type=Path,default=ROOT/'artifacts/strategy.joblib')
-    p.add_argument('--output',type=Path,default=ROOT/'artifacts')
+    p.add_argument('--data',type=Path,default=DATA_DIR/'NVDA_historical_features.csv')
+    p.add_argument('--bundle',type=Path,default=ARTIFACTS_DIR/'strategy.joblib')
+    p.add_argument('--output',type=Path,default=ARTIFACTS_DIR)
     a=p.parse_args()
     run(a.data,a.bundle,a.output)

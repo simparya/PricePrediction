@@ -4,6 +4,25 @@ A daily NVDA research strategy with a five-trading-session forecast and holding
 horizon. Outputs are order proposals, with `WAIT` when evidence is insufficient.
 Adding indicators does not establish a profitable or more accurate strategy.
 
+## Project layout
+
+```text
+PricePrediction/
+├── priceprediction/   # Application package, strategy, training and broker tools
+├── tests/             # Offline tests and mocked broker checks
+├── data/              # Cached CSV datasets and historical database
+├── models/            # Supplied XGBoost model
+├── reports/           # Historical HTML backtest reports
+├── artifacts/         # Generated models, metrics and runtime audit DB (ignored)
+├── .vscode/           # Editor workspace configuration
+├── .env.example       # Credential template; keep your local .env at the root
+├── requirements.txt
+└── README.md
+```
+
+Run the modules below from the repository root. Shared paths are resolved relative
+to the project, so data, credentials and outputs keep consistent locations.
+
 ## Run locally
 
 Python 3.12 was used for validation. From this directory:
@@ -12,21 +31,21 @@ Python 3.12 was used for validation. From this directory:
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
-python model_builder.py
-python backtester.py
-python main.py --data NVDA_historical_features.csv
-python -m unittest -v test_strategy test_execution test_integration
+python -m priceprediction.model_builder
+python -m priceprediction.backtester
+python -m priceprediction.main --data data/NVDA_historical_features.csv
+python -m unittest discover -s tests -v
 ```
 
 In the prepared cloud environment, activate
 `/workspace/priceprediction-venv/bin/activate` instead. Models, evaluation JSON,
 and trade CSVs are saved under ignored `artifacts/`. Only load trusted local
 joblib bundles: deserializing an untrusted bundle can execute code. The original
-`nvda_xgboost_model.json` and cached data remain unchanged.
+`models/nvda_xgboost_model.json` and cached data remain unchanged.
 
 ## Signals and orders
 
-`strategy.py` computes the same features for training, backtesting and proposals:
+`priceprediction/strategy.py` computes the same features for training, backtesting and proposals:
 
 - Bullish/bearish/neutral regime from SMA50/SMA200 alignment, SMA50 slope,
   directional movement and ADX. This is a causal regime classification heuristic,
@@ -102,13 +121,13 @@ these results as investment evidence.
 ## Optional paper workflow
 
 Set `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` securely (or the existing
-`APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` names from `.env.example`), then run `python main.py`
+`APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` names from `.env.example`), then run `python -m priceprediction.main`
 for a fresh-data proposal only. The old hardcoded keys have been removed from the
 Python files; rotate the previously exposed credentials, which remain in Git
 history. Do not commit credentials or `.env` files. No Hugging Face downloads or
 FinBERT initialization are needed for this price-only strategy.
 
-`python main.py --submit-paper` is an explicit paper-only execution command.
+`python -m priceprediction.main --submit-paper` is an explicit paper-only execution command.
 No real-money endpoint is supported. Run once each open-market session if enabled:
 this command also checks managed positions for the five-session time exit.
 It discards today's potentially incomplete candle and refuses stale signals,
@@ -128,13 +147,28 @@ its own validation data. Do not edit the bundle to bypass that result.
 
 The updated cached dataset, supplied model, credential configuration, SQLite audit
 module, notification module and retry/position-size utilities are retained.
-`config.py` loads either credential naming convention from the environment or a
+`priceprediction/config.py` loads either credential naming convention from the environment or a
 local `.env` file. Market-data reads use the existing retry helper; broker writes
 are not blindly retried. The strategy keeps its stricter position-size caps.
 
 Proposal audits and submitted-entry audits use `artifacts/trading_bot.db` by
 default (`--audit-db PATH` to change it), leaving the tracked historical
-`trading_bot.db` intact. Offline CSV proposals are logged locally too. Discord
+`data/trading_bot.db` intact. Offline CSV proposals are logged locally too. Discord
 alerts require explicit `--notify` plus a configured `DISCORD_WEBHOOK_URL`;
 normal evaluation and tests never send notifications. Paper broker paths have been tested with mocks only; Discord delivery has not
 been exercised.
+
+## Public quant research toolkit
+
+The mathematical reference, source-access record, equations and implementation
+roles are documented in [docs/QUANT_METHODS.md](docs/QUANT_METHODS.md). These are
+public methods, not replicas of proprietary Jane Street, Citadel or Capital One
+models. The toolkit adds EWMA volatility, Kalman filtering, OU diagnostics,
+GARCH fitting, moving-block simulation, tail-risk measures, fractional Kelly,
+HAC/bootstrap uncertainty and standalone portfolio/execution/credit calculations.
+
+Train the optional candidate with `python -m priceprediction.model_builder --quant`.
+It is saved separately under `artifacts/research/`; the active paper bundle is
+preserved. The current research candidate has no qualified confidence threshold
+and does not demonstrate an improved directional edge. See the reference for
+reproduction commands, results and limitations.

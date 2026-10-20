@@ -1,11 +1,14 @@
 import sqlite3
 import os
 from datetime import datetime
+from pathlib import Path
+from .paths import ARTIFACTS_DIR
 
-DB_FILE = "trading_bot.db"
+DB_FILE = str(ARTIFACTS_DIR / "trading_bot.db")
 
 def init_db(db_path=DB_FILE):
     """Initializes SQLite database tables for audit logging."""
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     

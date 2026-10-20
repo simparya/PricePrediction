@@ -71,7 +71,7 @@ def execute(decision,key,secret,signal_close,horizon=5,audit_path=None):
         stop_loss=StopLossRequest(stop_price=stop)))
     if audit_path is not None:
         from pathlib import Path
-        from db_manager import log_trade
+        from .db_manager import log_trade
         try:
             Path(audit_path).parent.mkdir(parents=True,exist_ok=True)
             up=decision['probability_up']

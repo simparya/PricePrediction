@@ -6,20 +6,22 @@ from datetime import datetime, timezone, timedelta
 import joblib
 import numpy as np
 import pandas as pd
-from strategy import FEATURES, prepare, plan, black_scholes
-from model_builder import probability
-from config import get_alpaca_credentials
-from utils import with_retry
+from .strategy import FEATURES, prepare, plan, black_scholes
+from .model_builder import probability
+from .config import get_alpaca_credentials
+from .utils import with_retry
+from .quant import QUANT_FEATURES, garch_variance
 
-ROOT=Path(__file__).resolve().parent
+from .paths import ARTIFACTS_DIR
 
 
 def propose(bars,bundle,equity=10000.):
     d=prepare(bars)
-    if len(d)<200 or not np.isfinite(d.iloc[-1][FEATURES].astype(float)).all():
+    features=bundle.get('features',FEATURES)
+    if len(d)<200 or not np.isfinite(d.iloc[-1][features].astype(float)).all():
         raise ValueError('Need at least 200 completed candles and valid indicators')
     p=float(probability(bundle,d.iloc[[-1]])[0])
-    decision=plan(d,p,bundle['threshold'],equity,bundle['horizon']).to_dict()
+    decision=plan(d,p,bundle['threshold'],equity,bundle['horizon'],quant_risk=bundle.get('quant_enabled',False)).to_dict()
     if not bundle['enabled']:
         decision.update(action='WAIT',reason='Validation did not qualify any confidence threshold',
                         stop=None,target=None,quantity=0)
@@ -29,6 +31,11 @@ def propose(bars,bundle,equity=10000.):
                            'adx':float(row.adx)}
     decision['black_scholes_atm_scenario']=black_scholes(float(row.close),float(row.close),
                                                         bundle['horizon']/252,float(row.volatility))
+    if bundle.get('quant_enabled',False):
+        decision['quant_diagnostics']={name:float(row[name]) for name in QUANT_FEATURES}
+        if 'garch_parameters' in bundle:
+            _,variance=garch_variance(d.log_return.dropna().to_numpy(),bundle['garch_parameters'])
+            decision['quant_diagnostics']['garch_next_daily_volatility']=float(np.sqrt(variance))
     decision['price']=float(row.close)
     decision['atr']=float(row.atr)
     decision['signal_bar']=str(d.index[-1])
@@ -54,7 +61,7 @@ def fetch_bars(key,secret):
 
 
 def audit_decision(decision,db_path):
-    from db_manager import log_prediction
+    from .db_manager import log_prediction
     db_path=Path(db_path)
     db_path.parent.mkdir(parents=True,exist_ok=True)
     up=decision['probability_up']
@@ -65,11 +72,11 @@ def audit_decision(decision,db_path):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--bundle',type=Path,default=ROOT/'artifacts/strategy.joblib')
+    p.add_argument('--bundle',type=Path,default=ARTIFACTS_DIR/'strategy.joblib')
     p.add_argument('--data',type=Path,help='Offline CSV; prints a historical proposal only')
     p.add_argument('--equity',type=float,default=10000.)
     p.add_argument('--submit-paper',action='store_true',help='Explicitly submit an Alpaca paper bracket')
-    p.add_argument('--audit-db',type=Path,default=ROOT/'artifacts/trading_bot.db')
+    p.add_argument('--audit-db',type=Path,default=ARTIFACTS_DIR/'trading_bot.db')
     p.add_argument('--notify',action='store_true',help='Explicitly send a configured Discord notification')
     a=p.parse_args()
     if a.submit_paper and a.data: p.error('Paper submission requires fresh Alpaca data, not a CSV')
@@ -90,9 +97,9 @@ if __name__=='__main__':
     audit_decision(decision,a.audit_db)
     print(json.dumps(decision,indent=2,allow_nan=False))
     if a.submit_paper:
-        from execution import execute
+        from .execution import execute
         print(execute(decision,key,secret,float(bars.close.iloc[-1]),bundle['horizon'],audit_path=a.audit_db))
     if a.notify:
-        from notifier import send_discord_alert, COLOR_BUY, COLOR_SELL, COLOR_INFO
+        from .notifier import send_discord_alert, COLOR_BUY, COLOR_SELL, COLOR_INFO
         color={'BUY':COLOR_BUY,'SELL':COLOR_SELL}.get(decision['action'],COLOR_INFO)
         send_discord_alert('NVDA strategy proposal',json.dumps(decision),color=color)

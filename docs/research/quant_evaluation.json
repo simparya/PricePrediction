@@ -1,0 +1,109 @@
+{
+  "horizon_sessions": 5,
+  "rows": 2107,
+  "splits": {
+    "train": {
+      "rows": 1048,
+      "start": "2018-04-05 04:00:00+00:00",
+      "end": "2022-06-01 04:00:00+00:00"
+    },
+    "calibration": {
+      "rows": 416,
+      "start": "2022-06-09 04:00:00+00:00",
+      "end": "2024-02-05 05:00:00+00:00"
+    },
+    "validation": {
+      "rows": 311,
+      "start": "2024-02-13 05:00:00+00:00",
+      "end": "2025-05-09 04:00:00+00:00"
+    },
+    "test": {
+      "rows": 317,
+      "start": "2025-05-19 04:00:00+00:00",
+      "end": "2026-08-21 04:00:00+00:00"
+    }
+  },
+  "purge_sessions_at_each_boundary": 5,
+  "threshold_candidates": [
+    {
+      "threshold": 0.5,
+      "samples": 54,
+      "precision": 0.5555555555555556,
+      "wilson_lower": 0.4237541391136446
+    },
+    {
+      "threshold": 0.55,
+      "samples": 54,
+      "precision": 0.5555555555555556,
+      "wilson_lower": 0.4237541391136446
+    },
+    {
+      "threshold": 0.6,
+      "samples": 42,
+      "precision": 0.47619047619047616,
+      "wilson_lower": 0.33359364475964953
+    }
+  ],
+  "selected": null,
+  "trading_enabled": false,
+  "test": {
+    "accuracy": 0.5867507886435331,
+    "brier": 0.24920254945755005,
+    "baseline_accuracy": 0.5299684542586751,
+    "baseline_brier": 0.2587798833847046,
+    "majority_class_accuracy": 0.5867507886435331,
+    "qualified_directional_signals": 0,
+    "qualified_directional_precision": null
+  },
+  "limitations": [
+    "Overlapping five-day labels make signal observations dependent; Wilson bounds are heuristic.",
+    "Cached OHLCV adjustment and timestamp provenance are not verified.",
+    "No claim of improved future accuracy; test returns exclude funding/borrow fees.",
+    "Black-Scholes uses historical volatility, zero rate/dividend; no market option quotes."
+  ],
+  "quant_research": {
+    "features": [
+      "q_ewma_vol",
+      "q_kalman_gap",
+      "q_ou_z",
+      "q_ou_strength",
+      "q_return_autocorr",
+      "q_downside_vol"
+    ],
+    "brier_improvement_vs_price_baseline_hac": {
+      "mean": 0.009577359006532837,
+      "standard_error": 0.005681620517778331,
+      "lower": -0.0015584125821365043,
+      "upper": 0.02071313059520218,
+      "lags": 5
+    },
+    "brier_improvement_vs_price_baseline_block_bootstrap": {
+      "mean": 0.009577359006532837,
+      "lower": -0.0007774504894586519,
+      "upper": 0.02048676945636413,
+      "block": 5,
+      "samples": 2000
+    },
+    "test_accuracy_block_bootstrap": {
+      "mean": 0.5867507886435331,
+      "lower": 0.4983438485804417,
+      "upper": 0.6656151419558359,
+      "block": 5,
+      "samples": 2000
+    },
+    "garch_fit_scope": "Training returns only; parameters frozen for later volatility updates",
+    "active_paper_model_replaced": false,
+    "test_reuse_warning": "This historical holdout has been inspected before. Results are exploratory; collect new forward data.",
+    "garch11": {
+      "parameters": {
+        "omega": 7.600804225688895e-06,
+        "alpha": 0.0,
+        "beta": 0.998,
+        "mean": -0.00020135298708795618,
+        "initial_variance": 0.0029053839072140683
+      },
+      "next_daily_volatility": 0.06154041855366212,
+      "boundary_fit_warning": true
+    }
+  }
+}

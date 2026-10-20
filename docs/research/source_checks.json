@@ -1,0 +1,91 @@
+[
+  {
+    "name": "riskmetrics",
+    "url": "https://www.msci.com/documents/10199/5915b101-4206-4ba0-aee2-3449d5c7e95",
+    "error": "ProxyError"
+  },
+  {
+    "name": "kalman",
+    "url": "https://www.cs.unc.edu/~welch/media/pdf/kalman_intro.pdf",
+    "error": "ProxyError"
+  },
+  {
+    "name": "kelly",
+    "url": "https://www.princeton.edu/~wbialek/rome/refs/kelly_56.pdf",
+    "error": "ProxyError"
+  },
+  {
+    "name": "almgren_chriss",
+    "url": "https://www.math.nyu.edu/~chriss/optliq_f.pdf",
+    "error": "ProxyError"
+  },
+  {
+    "name": "avellaneda_stoikov",
+    "url": "https://www.math.nyu.edu/~avellane/HighFrequencyTrading.pdf",
+    "error": "ProxyError"
+  },
+  {
+    "name": "capital_one",
+    "url": "https://www.capitalone.com/tech/machine-learning/",
+    "error": "ProxyError"
+  },
+  {
+    "name": "jane_street",
+    "url": "https://www.janestreet.com/technology/",
+    "error": "ProxyError"
+  },
+  {
+    "name": "citadel",
+    "url": "https://www.citadel.com/what-we-do/",
+    "error": "ProxyError"
+  },
+  {
+    "name": "arch_volatility",
+    "url": "https://raw.githubusercontent.com/bashtage/arch/main/arch/univariate/volatility.py",
+    "status": 200,
+    "sha256": "23723bedd9eee19e6f560aad071928e13e561d0cbdf496a4e0bfb97d6a7fdebd",
+    "checked_on": "2026-10-20"
+  },
+  {
+    "name": "statsmodels_kalman",
+    "url": "https://raw.githubusercontent.com/statsmodels/statsmodels/main/statsmodels/tsa/statespace/kalman_filter.py",
+    "status": 200,
+    "sha256": "5fd2a63f3a781e1061f4105032cd5a685f166bc8f039f7e64ce7504174369d0a",
+    "checked_on": "2026-10-20"
+  },
+  {
+    "name": "sklearn_calibration",
+    "url": "https://raw.githubusercontent.com/scikit-learn/scikit-learn/main/sklearn/calibration.py",
+    "status": 200,
+    "sha256": "6c1469ce6208e3fe087b13dfc238eed763762a618639dd4aae8b43a204608804",
+    "checked_on": "2026-10-20"
+  },
+  {
+    "name": "scipy_statistics",
+    "url": "https://raw.githubusercontent.com/scipy/scipy/main/scipy/stats/_stats_py.py",
+    "status": 200,
+    "sha256": "53ac9b897cd4e94cbe26d5815f1aea5468ba17e79b34bb22ab142c40a53ff305",
+    "checked_on": "2026-10-20"
+  },
+  {
+    "name": "statsmodels_hac",
+    "url": "https://raw.githubusercontent.com/statsmodels/statsmodels/main/statsmodels/stats/sandwich_covariance.py",
+    "status": 200,
+    "sha256": "fad35aa8d3ca5c210a3de60a99c75632cc6bb9155f068be2b9dae9d205e1a08c",
+    "checked_on": "2026-10-20"
+  },
+  {
+    "name": "arch_bootstrap",
+    "url": "https://raw.githubusercontent.com/bashtage/arch/main/arch/bootstrap/base.py",
+    "status": 200,
+    "sha256": "3eec6f3a86d618059679ddec86074a99ee77524749f1b8877fdc82f7f76b2b46",
+    "checked_on": "2026-10-20"
+  },
+  {
+    "name": "portfolio_example",
+    "url": "https://raw.githubusercontent.com/cvxgrp/cvx_short_course/master/book/docs/applications/notebooks/portfolio_optimization.ipynb",
+    "status": 200,
+    "sha256": "1944c9d108dcfdaf1ea9ab4fcb3c4009b8154c11620ed38456a5e286cf3bcfa2",
+    "checked_on": "2026-10-20"
+  }
+]

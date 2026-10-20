@@ -3,6 +3,7 @@ from dataclasses import dataclass, asdict
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
+from .quant import causal_features, tail_risk, fractional_kelly
 
 FEATURES = ['sma10', 'sma50', 'sma200', 'slope50', 'momentum20', 'rsi',
             'atr_pct', 'volatility', 'volume_z', 'adx', 'di_balance',
@@ -65,6 +66,7 @@ def prepare(bars):
     bull = (c>d.ma200) & (d.ma50>d.ma200) & (d.slope50>0) & (d.di_balance>0) & (d.adx>=20)
     bear = (c<d.ma200) & (d.ma50<d.ma200) & (d.slope50<0) & (d.di_balance<0) & (d.adx>=20)
     d['regime'] = np.select([bull,bear],[1,-1],default=0)
+    d=d.join(causal_features(c))
     return d
 
 
@@ -79,17 +81,23 @@ def black_scholes(spot, strike, years, volatility, rate=0.0, dividend=0.0):
             'risk_neutral_above_strike':float(norm.cdf(d2))}
 
 
-def simulate(returns, spot, stop, target, side, horizon=5, paths=4000, seed=42, cost=.002):
+def simulate(returns, spot, stop, target, side, horizon=5, paths=4000, seed=42, cost=.002, block_size=1):
     """Bootstrap daily close paths; stop-first on a sampled barrier crossing.
 
     Daily paths miss intraday crossings. These are diagnostics, not calibrated odds.
     """
     r=np.asarray(returns,dtype=float)
     r=r[np.isfinite(r)][-252:]
-    if len(r)<60 or horizon<1 or paths<1: raise ValueError('Insufficient simulation history or invalid dimensions')
+    if len(r)<60 or horizon<1 or paths<1 or not 1<=block_size<=len(r): raise ValueError('Insufficient simulation history or invalid dimensions')
+    if side not in (-1,1) or not np.isfinite([spot,stop,target,cost]).all() or min(spot,stop,target)<=0 or cost<0:
+        raise ValueError('Invalid simulation prices, side or cost')
+    if not (stop<spot<target if side==1 else target<spot<stop): raise ValueError('Invalid simulation bracket')
     rng=np.random.default_rng(seed)
     # Shrink noisy historical drift toward zero, preserving empirical shocks.
-    draws=rng.choice(r-r.mean()+.25*r.mean(),size=(paths,horizon))
+    centered=r-r.mean()+.25*r.mean()
+    starts=rng.integers(0,len(r)-block_size+1,size=(paths,int(np.ceil(horizon/block_size))))
+    indices=(starts[:,:,None]+np.arange(block_size)).reshape(paths,-1)[:,:horizon]
+    draws=centered[indices]
     prices=spot*np.exp(np.cumsum(draws,axis=1))
     exit_prices=prices[:,-1].copy()
     active=np.ones(paths,dtype=bool)
@@ -102,7 +110,9 @@ def simulate(returns, spot, stop, target, side, horizon=5, paths=4000, seed=42, 
         active &= ~(stop_hit|target_hit)
     net=side*(exit_prices/spot-1)-cost
     return {'profitable_probability':float((net>0).mean()), 'expected_net_return':float(net.mean()),
-            'terminal_p05':float(np.quantile(prices[:,-1],.05)), 'terminal_p95':float(np.quantile(prices[:,-1],.95))}
+            'terminal_p05':float(np.quantile(prices[:,-1],.05)), 'terminal_p95':float(np.quantile(prices[:,-1],.95)),
+            'var_95':tail_risk(net)['var'], 'expected_shortfall_95':tail_risk(net)['expected_shortfall'],
+            'block_size':int(block_size)}
 
 
 @dataclass
@@ -120,7 +130,7 @@ class Decision:
     def to_dict(self): return asdict(self)
 
 
-def plan(history, probability, threshold=.6, equity=10000., horizon=5, risk_fraction=.005):
+def plan(history, probability, threshold=.6, equity=10000., horizon=5, risk_fraction=.005, quant_risk=False):
     if not 0<=probability<=1 or not .5<=threshold<=1 or equity<=0 or not 0<risk_fraction<=.02:
         raise ValueError('Invalid probability, threshold, equity or risk budget')
     row=history.iloc[-1]
@@ -145,9 +155,17 @@ def plan(history, probability, threshold=.6, equity=10000., horizon=5, risk_frac
     risk=abs(price-stop)
     if min(stop,target)<=0 or risk<=0 or side*(target-price)<=0 or side*(price-stop)<=0:
         return wait('Invalid bracket')
-    mc=simulate(history.log_return,price,stop,target,side,horizon=horizon)
+    mc=simulate(history.log_return,price,stop,target,side,horizon=horizon,block_size=min(5,horizon) if quant_risk else 1)
     bs=black_scholes(price,target,horizon/252,float(row.volatility))
     quantity=int(min(equity*risk_fraction/risk,equity*.2/price))
+    if quant_risk:
+        # These tighten exposure only; they never enable a rejected direction.
+        # MC probabilities are for barrier outcomes, not model direction labels.
+        kelly=fractional_kelly(mc['profitable_probability'],abs(target-price)/risk)
+        es=mc['expected_shortfall_95']
+        quantity=min(quantity,int(equity*kelly/price))
+        if es>0: quantity=min(quantity,int(equity*risk_fraction/(price*es)))
+        mc['fractional_kelly_notional_cap']=kelly
     if mc['profitable_probability']<.52 or mc['expected_net_return']<=0 or quantity<1:
         return Decision('WAIT','Simulation or position-size filter',float(probability),regime,monte_carlo=mc,black_scholes=bs)
     return Decision('BUY' if side==1 else 'SELL','Confidence, regime, structure and simulation agree',float(probability),regime,
