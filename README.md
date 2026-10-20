@@ -15,7 +15,7 @@ python -m pip install -r requirements.txt
 python model_builder.py
 python backtester.py
 python main.py --data NVDA_historical_features.csv
-python -m unittest -v test_strategy test_execution
+python -m unittest -v test_strategy test_execution test_integration
 ```
 
 In the prepared cloud environment, activate
@@ -71,16 +71,16 @@ No qualifying threshold means trading is disabled, rather than selecting a
 threshold after looking at the final test results. Tests remain separate from
 calibration and validation, and no test-period refit occurs.
 
-The supplied dataset produced this initial run:
+After merging the updated dataset from `main`, the evaluation produced:
 
 | Holdout measure | Result |
 | --- | ---: |
 | Test sessions with labels | 317 |
-| Calibrated directional accuracy | 58.04% |
+| Calibrated directional accuracy | 58.68% |
 | Price-only baseline accuracy on the same split/horizon | 53.00% |
-| Always-bullish accuracy | 58.04% |
-| Calibrated Brier score | 0.24993 |
-| Baseline Brier score | 0.25938 |
+| Always-bullish accuracy | 58.68% |
+| Calibrated Brier score | 0.24938 |
+| Baseline Brier score | 0.25878 |
 | Qualified validation threshold | None |
 | Strategy trades | 0 |
 
@@ -101,7 +101,8 @@ these results as investment evidence.
 
 ## Optional paper workflow
 
-Set `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` securely, then run `python main.py`
+Set `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` securely (or the existing
+`APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` names from `.env.example`), then run `python main.py`
 for a fresh-data proposal only. The old hardcoded keys have been removed from the
 Python files; rotate the previously exposed credentials, which remain in Git
 history. Do not commit credentials or `.env` files. No Hugging Face downloads or
@@ -122,3 +123,18 @@ Paper broker integration is covered by mocked tests; no API authentication,
 market-data feed entitlement, paper fills or order placement was tested here.
 The current trained bundle will abstain until a newly trained model qualifies on
 its own validation data. Do not edit the bundle to bypass that result.
+
+## Integration with the updated main branch
+
+The updated cached dataset, supplied model, credential configuration, SQLite audit
+module, notification module and retry/position-size utilities are retained.
+`config.py` loads either credential naming convention from the environment or a
+local `.env` file. Market-data reads use the existing retry helper; broker writes
+are not blindly retried. The strategy keeps its stricter position-size caps.
+
+Proposal audits and submitted-entry audits use `artifacts/trading_bot.db` by
+default (`--audit-db PATH` to change it), leaving the tracked historical
+`trading_bot.db` intact. Offline CSV proposals are logged locally too. Discord
+alerts require explicit `--notify` plus a configured `DISCORD_WEBHOOK_URL`;
+normal evaluation and tests never send notifications. Paper broker paths have been tested with mocks only; Discord delivery has not
+been exercised.

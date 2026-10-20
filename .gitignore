@@ -4,3 +4,5 @@ __pycache__/
 artifacts/
 *.joblib
 .venv/
+*.db-wal
+*.db-shm

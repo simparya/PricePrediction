@@ -12,7 +12,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderS
 PREFIX='combined-NVDA-'
 
 
-def execute(decision,key,secret,signal_close,horizon=5):
+def execute(decision,key,secret,signal_close,horizon=5,audit_path=None):
     client=TradingClient(key,secret,paper=True)
     clock=client.get_clock()
     if not clock.is_open: raise RuntimeError('Market is closed; no action taken')
@@ -64,9 +64,21 @@ def execute(decision,key,secret,signal_close,horizon=5):
     qty=min(decision['quantity'],int(float(account.equity)*.005/abs(limit-stop)),
             int(float(account.buying_power)*.2/limit),int(float(account.equity)*.2/limit))
     if qty<1: raise RuntimeError('Insufficient buying power or risk budget')
-    client.submit_order(order_data=LimitOrderRequest(
+    submitted=client.submit_order(order_data=LimitOrderRequest(
         symbol='NVDA',qty=qty,side=side,limit_price=limit,
         time_in_force=TimeInForce.DAY,order_class=OrderClass.BRACKET,
         client_order_id=order_id,take_profit=TakeProfitRequest(limit_price=target),
         stop_loss=StopLossRequest(stop_price=stop)))
+    if audit_path is not None:
+        from pathlib import Path
+        from db_manager import log_trade
+        try:
+            Path(audit_path).parent.mkdir(parents=True,exist_ok=True)
+            up=decision['probability_up']
+            log_trade('NVDA',side.value,qty,limit,stop,target,max(up,1-up),
+                      order_id=submitted.id,db_path=str(audit_path))
+        except Exception:
+            # Submission succeeded. Never retry a broker write because local audit failed.
+            import warnings
+            warnings.warn('Paper order submitted, but local trade audit failed; inspect broker before retrying')
     return 'Paper limit bracket submitted'

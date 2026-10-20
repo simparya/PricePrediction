@@ -25,6 +25,20 @@ class ExecutionTests(unittest.TestCase):
         self.assertLess(order.stop_loss.stop_price,order.limit_price)
         self.assertGreater(order.take_profit.limit_price,order.limit_price)
 
+    def test_submitted_entry_is_audited_with_broker_id(self):
+        import tempfile
+        import sqlite3
+        from pathlib import Path
+        self.client.submit_order.return_value=NS(id='paper-order-123')
+        decision={**self.decision,'probability_up':.8}
+        with tempfile.TemporaryDirectory() as tmp:
+            target=Path(tmp)/'audit.db'
+            with patch('execution.TradingClient',return_value=self.client):
+                execute(decision,'k','s',100.,audit_path=target)
+            with sqlite3.connect(target) as db:
+                record=db.execute('SELECT qty,alpaca_order_id,status FROM trades').fetchone()
+            self.assertEqual(record,(10,'paper-order-123','SUBMITTED'))
+
     def test_duplicate_signal_is_not_resubmitted(self):
         self.client.get_orders.return_value=[NS(client_order_id='combined-NVDA-20260713-buy',filled_at=None)]
         with patch('execution.TradingClient',return_value=self.client):
