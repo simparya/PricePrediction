@@ -3,7 +3,11 @@ from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-from transformers import pipeline
+
+import db_manager
+from config import get_alpaca_credentials
+from notifier import send_discord_alert, COLOR_BUY, COLOR_SELL, COLOR_INFO, COLOR_WARNING
+from utils import with_retry, calculate_position_size
 
 # Alpaca Trading & Orders
 from alpaca.common.exceptions import APIError
@@ -19,15 +23,20 @@ from alpaca.data.timeframe import TimeFrame
 # ==========================================
 # 1. INITIALIZATION
 # ==========================================
-API_KEY = 'PKH7VBANASKPY6VTXRL7HHTB63'
-SECRET_KEY ='71pqaHS8VBYi5kzrFJ22DqUfJBUGLibk5NsGPzPkRMWz'
+API_KEY, SECRET_KEY = get_alpaca_credentials()
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 news_client = NewsClient(API_KEY, SECRET_KEY)
 
 SYMBOL = "NVDA"
-QTY = 10
+CONFIDENCE_THRESHOLD = 0.70  # Model confidence must strictly be >= 70% to trade
+RISK_PER_TRADE_PCT = 0.01    # Risk 1.0% of portfolio equity per trade
+SL_ATR_MULT = 1.5            # Dynamic 1.5x ATR Stop Loss
+TP_ATR_MULT = 3.0            # Dynamic 3.0x ATR Take Profit (2:1 Reward to Risk Ratio)
+
+# Initialize SQLite Audit Log
+db_manager.init_db()
 
 # The 9 stationary features your model was trained on
 FEATURES = [
@@ -39,8 +48,32 @@ print("Loading XGBoost model...")
 model = xgb.XGBClassifier()
 model.load_model("nvda_xgboost_model.json")
 
-print("Loading FinBERT Sentiment Analyzer...")
-sentiment_analyzer = pipeline("text-classification", model="ProsusAI/finbert")
+_sentiment_analyzer = None
+
+def get_sentiment_analyzer():
+    global _sentiment_analyzer
+    if _sentiment_analyzer is None:
+        try:
+            from transformers import pipeline
+            print("Loading FinBERT Sentiment Analyzer...")
+            _sentiment_analyzer = pipeline("text-classification", model="ProsusAI/finbert")
+        except Exception as e:
+            print(f"Warning: Could not load FinBERT sentiment analyzer due to environment/DLL restriction: {e}")
+            _sentiment_analyzer = False
+    return _sentiment_analyzer if _sentiment_analyzer is not False else None
+
+@with_retry(max_retries=3)
+def fetch_stock_bars(request_params):
+    return data_client.get_stock_bars(request_params).df
+
+@with_retry(max_retries=3)
+def get_account_equity():
+    account = trading_client.get_account()
+    return float(account.equity)
+
+@with_retry(max_retries=3)
+def submit_order_safe(order_data):
+    return trading_client.submit_order(order_data=order_data)
 
 # ==========================================
 # 2. FEATURE ENGINEERING (LIVE DATA)
@@ -55,7 +88,7 @@ def get_live_features():
         start=datetime.now(timezone.utc) - pd.Timedelta(days=350)
     )
     
-    bars = data_client.get_stock_bars(request_params).df
+    bars = fetch_stock_bars(request_params)
     if isinstance(bars.index, pd.MultiIndex):
         bars = bars.xs(SYMBOL, level="symbol")
     
@@ -132,11 +165,15 @@ def get_live_features():
         if not headlines:
             sentiment_score = 0.0
         else:
-            sentiment_result = sentiment_analyzer(headlines[:1500])[0] 
-            if sentiment_result['label'] == 'positive':
-                sentiment_score = sentiment_result['score']
-            elif sentiment_result['label'] == 'negative':
-                sentiment_score = -sentiment_result['score']
+            analyzer = get_sentiment_analyzer()
+            if analyzer is not None:
+                sentiment_result = analyzer(headlines[:1500])[0] 
+                if sentiment_result['label'] == 'positive':
+                    sentiment_score = sentiment_result['score']
+                elif sentiment_result['label'] == 'negative':
+                    sentiment_score = -sentiment_result['score']
+                else:
+                    sentiment_score = 0.0 
             else:
                 sentiment_score = 0.0 
                 
@@ -206,70 +243,173 @@ def execute_trade():
             position_side = current_pos.side.value.lower() if hasattr(current_pos.side, 'value') else str(current_pos.side).lower()
 
         features_df, current_price, current_atr, is_bull_market = get_live_features()
-        prediction = model.predict(features_df)[0] 
+        probabilities = model.predict_proba(features_df)[0]
+        prob_down, prob_up = probabilities[0], probabilities[1]
+        confidence = max(prob_up, prob_down)
         
-        print(f"[{datetime.now()}] Signal: {'BUY/LONG' if prediction == 1 else 'SELL/SHORT'} | Price: ${current_price:.2f} | ATR: ${current_atr:.2f} | Bull Regime: {is_bull_market} | Position: {position_side or 'NONE'}")
+        # Calculate Volatility-Adjusted Position Size based on 1% Equity Risk & ATR
+        try:
+            equity = get_account_equity()
+        except Exception:
+            equity = 100000.0  # Fallback paper capital
+            
+        qty, dollar_risk, stop_dist = calculate_position_size(
+            portfolio_equity=equity,
+            current_price=current_price,
+            atr=current_atr,
+            risk_pct=RISK_PER_TRADE_PCT,
+            sl_atr_mult=SL_ATR_MULT
+        )
+        
+        print(f"[{datetime.now()}] Model Confidence: UP={prob_up*100:.1f}%, DOWN={prob_down*100:.1f}% | Price: ${current_price:.2f} | ATR: ${current_atr:.2f} | Equity: ${equity:,.2f} | Risked Shares: {qty} | Bull Regime: {is_bull_market} | Position: {position_side or 'NONE'}")
+
+        # Determine signal action string for SQLite logging
+        if prob_up >= CONFIDENCE_THRESHOLD and is_bull_market:
+            action_str = "BUY"
+        elif prob_down >= CONFIDENCE_THRESHOLD and not is_bull_market:
+            action_str = "SELL"
+        else:
+            action_str = "HOLD/NO_TRADE"
+
+        # Log prediction to SQLite Database Audit Log
+        db_manager.log_prediction(
+            symbol=SYMBOL,
+            close_price=current_price,
+            atr=current_atr,
+            prob_up=prob_up,
+            prob_down=prob_down,
+            confidence=confidence,
+            is_bull_market=is_bull_market,
+            action=action_str
+        )
 
         # --------------------------------------------------
-        # SIGNAL: BULLISH (1) AND BULL REGIME -> Enter or Hold LONG
+        # SIGNAL: BULLISH (prob_up >= 70%) AND BULL REGIME -> Enter or Hold LONG
         # --------------------------------------------------
-        if prediction == 1 and is_bull_market:
+        if prob_up >= CONFIDENCE_THRESHOLD and is_bull_market:
             if position_side == 'short':
                 print("Signal changed to LONG. Closing SHORT position...")
                 close_position_safely(SYMBOL)
                 position_side = None
             if position_side is None:
-                print("Action: EXECUTING LONG (ATR Dynamic Bracket)")
-                take_profit_price = round(current_price + (2.0 * current_atr), 2)
-                stop_loss_price = round(current_price - (1.0 * current_atr), 2)
+                take_profit_price = round(current_price + (TP_ATR_MULT * current_atr), 2)
+                stop_loss_price = round(current_price - (SL_ATR_MULT * current_atr), 2)
+                
+                print(f"Action: EXECUTING LONG (Confidence: {prob_up*100:.1f}% >= {CONFIDENCE_THRESHOLD*100:.0f}% | Qty: {qty} shares | TP: ${take_profit_price} | SL: ${stop_loss_price})")
 
                 long_order = MarketOrderRequest(
                     symbol=SYMBOL,
-                    qty=QTY,
+                    qty=qty,
                     side=OrderSide.BUY,
                     time_in_force=TimeInForce.GTC,
                     order_class=OrderClass.BRACKET,
                     take_profit=TakeProfitRequest(limit_price=take_profit_price),
                     stop_loss=StopLossRequest(stop_price=stop_loss_price)
                 )
-                trading_client.submit_order(order_data=long_order)
-                print(f"Long Order Placed! TP: ${take_profit_price} | SL: ${stop_loss_price}")
+                
+                order_res = submit_order_safe(long_order)
+                order_id = getattr(order_res, 'id', '')
+                
+                # Log trade execution to SQLite
+                db_manager.log_trade(
+                    symbol=SYMBOL,
+                    side="BUY",
+                    qty=qty,
+                    entry_price=current_price,
+                    sl_price=stop_loss_price,
+                    tp_price=take_profit_price,
+                    confidence=prob_up,
+                    status="SUBMITTED",
+                    order_id=order_id
+                )
+                
+                # Dispatch Discord Alert Notification
+                send_discord_alert(
+                    title=f"🚀 EXECUTED BUY LONG: {SYMBOL}",
+                    description=f"Automated trade submitted with 1% equity risk and dynamic ATR bracket.",
+                    color=COLOR_BUY,
+                    fields=[
+                        {"name": "Symbol", "value": SYMBOL, "inline": True},
+                        {"name": "Quantity", "value": str(qty), "inline": True},
+                        {"name": "Entry Price", "value": f"${current_price:.2f}", "inline": True},
+                        {"name": "AI Confidence", "value": f"{prob_up*100:.1f}%", "inline": True},
+                        {"name": "Take Profit", "value": f"${take_profit_price:.2f} (+{TP_ATR_MULT}x ATR)", "inline": True},
+                        {"name": "Stop Loss", "value": f"${stop_loss_price:.2f} (-{SL_ATR_MULT}x ATR)", "inline": True}
+                    ]
+                )
+                print(f"Long Order Placed! Order ID: {order_id} | TP: ${take_profit_price} | SL: ${stop_loss_price}")
             else:
                 print("Action: HOLD LONG")
 
         # --------------------------------------------------
-        # SIGNAL: BEARISH (0) AND BEAR REGIME -> Enter or Hold SHORT
+        # SIGNAL: BEARISH (prob_down >= 70%) AND BEAR REGIME -> Enter or Hold SHORT
         # --------------------------------------------------
-        elif prediction == 0 and not is_bull_market:
+        elif prob_down >= CONFIDENCE_THRESHOLD and not is_bull_market:
             if position_side == 'long':
                 print("Signal changed to SHORT. Closing LONG position...")
                 close_position_safely(SYMBOL)
                 position_side = None
             if position_side is None:
-                print("Action: EXECUTING SHORT (ATR Dynamic Bracket)")
-                take_profit_price = round(current_price - (2.0 * current_atr), 2)
-                stop_loss_price = round(current_price + (1.0 * current_atr), 2)
+                take_profit_price = round(current_price - (TP_ATR_MULT * current_atr), 2)
+                stop_loss_price = round(current_price + (SL_ATR_MULT * current_atr), 2)
+
+                print(f"Action: EXECUTING SHORT (Confidence: {prob_down*100:.1f}% >= {CONFIDENCE_THRESHOLD*100:.0f}% | Qty: {qty} shares | TP: ${take_profit_price} | SL: ${stop_loss_price})")
 
                 short_order = MarketOrderRequest(
                     symbol=SYMBOL,
-                    qty=QTY,
+                    qty=qty,
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
                     order_class=OrderClass.BRACKET,
                     take_profit=TakeProfitRequest(limit_price=take_profit_price),
                     stop_loss=StopLossRequest(stop_price=stop_loss_price)
                 )
-                trading_client.submit_order(order_data=short_order)
-                print(f"Short Order Placed! TP: ${take_profit_price} | SL: ${stop_loss_price}")
+                
+                order_res = submit_order_safe(short_order)
+                order_id = getattr(order_res, 'id', '')
+                
+                # Log trade execution to SQLite
+                db_manager.log_trade(
+                    symbol=SYMBOL,
+                    side="SELL",
+                    qty=qty,
+                    entry_price=current_price,
+                    sl_price=stop_loss_price,
+                    tp_price=take_profit_price,
+                    confidence=prob_down,
+                    status="SUBMITTED",
+                    order_id=order_id
+                )
+                
+                # Dispatch Discord Alert Notification
+                send_discord_alert(
+                    title=f"📉 EXECUTED SELL SHORT: {SYMBOL}",
+                    description=f"Automated short trade submitted with 1% equity risk and dynamic ATR bracket.",
+                    color=COLOR_SELL,
+                    fields=[
+                        {"name": "Symbol", "value": SYMBOL, "inline": True},
+                        {"name": "Quantity", "value": str(qty), "inline": True},
+                        {"name": "Entry Price", "value": f"${current_price:.2f}", "inline": True},
+                        {"name": "AI Confidence", "value": f"{prob_down*100:.1f}%", "inline": True},
+                        {"name": "Take Profit", "value": f"${take_profit_price:.2f} (-{TP_ATR_MULT}x ATR)", "inline": True},
+                        {"name": "Stop Loss", "value": f"${stop_loss_price:.2f} (+{SL_ATR_MULT}x ATR)", "inline": True}
+                    ]
+                )
+                print(f"Short Order Placed! Order ID: {order_id} | TP: ${take_profit_price} | SL: ${stop_loss_price}")
             else:
                 print("Action: HOLD SHORT")
 
         else:
             if position_side is not None:
-                print("Signal conflicts with 200-day secular trend. Closing active position safely...")
+                print(f"Confidence (UP={prob_up*100:.1f}%, DOWN={prob_down*100:.1f}%) below {CONFIDENCE_THRESHOLD*100:.0f}% threshold or conflicts with secular trend. Closing active position safely...")
                 close_position_safely(SYMBOL)
+                send_discord_alert(
+                    title=f"⚠️ LIQUIDATED POSITION: {SYMBOL}",
+                    description=f"Active position closed due to trend mismatch or confidence decay below threshold.",
+                    color=COLOR_WARNING
+                )
             else:
-                print("Action: NO TRADE (Filtered out by 200-day Secular Trend Filter)")
+                print(f"Action: NO TRADE (Confidence UP={prob_up*100:.1f}%, DOWN={prob_down*100:.1f}% did not meet strictly >= {CONFIDENCE_THRESHOLD*100:.0f}% threshold or regime filter)")
 
     except Exception as e:
         print(f"Trading Execution Error: {e}")
@@ -282,4 +422,3 @@ if __name__ == "__main__":
     while True:
         execute_trade()
         time.sleep(86400)
-

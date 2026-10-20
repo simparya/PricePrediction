@@ -1,9 +1,11 @@
 import pandas as pd
 import numpy as np
 import xgboost as xgb
+from config import get_alpaca_credentials
 from datetime import datetime, timedelta
 from tqdm import tqdm
-from transformers import pipeline
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_auc_score
 from alpaca.data.historical import StockHistoricalDataClient, NewsClient
 from alpaca.data.requests import StockBarsRequest, NewsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -11,17 +13,27 @@ from alpaca.data.timeframe import TimeFrame
 # ==========================================
 # 1. INITIALIZATION
 # ==========================================
-API_KEY = 'PKH7VBANASKPY6VTXRL7HHTB63'
-SECRET_KEY ='71pqaHS8VBYi5kzrFJ22DqUfJBUGLibk5NsGPzPkRMWz'
+API_KEY, SECRET_KEY = get_alpaca_credentials()
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 news_client = NewsClient(API_KEY, SECRET_KEY)
 
 SYMBOL = "NVDA"
 YEARS_OF_DATA = 10
 
-# Load FinBERT
-print("Loading FinBERT Sentiment Analyzer...")
-sentiment_analyzer = pipeline("text-classification", model="ProsusAI/finbert", device=-1) # Change device=0 if you have a GPU
+# Lazy loading helper for FinBERT
+_sentiment_analyzer = None
+
+def get_sentiment_analyzer():
+    global _sentiment_analyzer
+    if _sentiment_analyzer is None:
+        try:
+            from transformers import pipeline
+            print("Loading FinBERT Sentiment Analyzer...")
+            _sentiment_analyzer = pipeline("text-classification", model="ProsusAI/finbert", device=-1)
+        except Exception as e:
+            print(f"Warning: Could not load FinBERT sentiment analyzer due to environment/DLL restriction: {e}")
+            _sentiment_analyzer = False
+    return _sentiment_analyzer if _sentiment_analyzer is not False else None
 
 # ==========================================
 # 2. FETCH HISTORICAL PRICE & TECHNICALS
@@ -133,13 +145,17 @@ def build_sentiment_dataset(dates):
 
             headlines = " ".join([article.headline for article in articles])
             
-            # FinBERT limits input size to 512 tokens. Truncate if necessary.
-            sentiment_result = sentiment_analyzer(headlines[:1500])[0] 
-            
-            if sentiment_result['label'] == 'positive':
-                score = sentiment_result['score']
-            elif sentiment_result['label'] == 'negative':
-                score = -sentiment_result['score']
+            analyzer = get_sentiment_analyzer()
+            if analyzer is not None:
+                # FinBERT limits input size to 512 tokens. Truncate if necessary.
+                sentiment_result = analyzer(headlines[:1500])[0] 
+                
+                if sentiment_result['label'] == 'positive':
+                    score = sentiment_result['score']
+                elif sentiment_result['label'] == 'negative':
+                    score = -sentiment_result['score']
+                else:
+                    score = 0.0
             else:
                 score = 0.0
                 
@@ -171,7 +187,7 @@ if __name__ == "__main__":
     final_df.to_csv(f"{SYMBOL}_historical_features.csv")
     print(f"\nData saved to {SYMBOL}_historical_features.csv")
 
-    # 4. Train XGBoost with stationary technical, volatility, volume, and sentiment features
+    # 4. Extract Features & Target
     features = [
         'SMA_10_Ratio', 'SMA_50_Ratio', 'SMA_200_Ratio', 
         'RSI_14', 'ATR_Pct', 'BB_Pct', 'VWAP_Ratio', 'OBV_Z', 'Sentiment_Score'
@@ -180,23 +196,79 @@ if __name__ == "__main__":
     X = final_df[features]
     y = final_df['Target']
 
-    # Sequential split (no shuffling) to prevent look-ahead bias
-    split_idx = int(len(final_df) * 0.8)
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-
-    print(f"\nTraining XGBoost model on {len(X_train)} days of data...")
-    model = xgb.XGBClassifier(
-        n_estimators=150,
-        learning_rate=0.03,
-        max_depth=4,
-        random_state=42
-    )
+    print(f"\n==========================================")
+    print("PHASE 2: WALK-FORWARD HYPERPARAMETER TUNING")
+    print("==========================================")
+    print(f"Dataset Size: {len(X)} trading days")
     
-    model.fit(X_train, y_train)
-    accuracy = model.score(X_test, y_test)
-    print(f"Model Test Accuracy: {accuracy * 100:.2f}%")
+    # 5. Define Time-Series Cross Validation & Hyperparameter Grid
+    tscv = TimeSeriesSplit(n_splits=5)
+    param_grid = {
+        'n_estimators': [100, 150, 200],
+        'max_depth': [3, 4, 5],
+        'learning_rate': [0.01, 0.03, 0.05],
+        'subsample': [0.8, 1.0],
+        'colsample_bytree': [0.8, 1.0]
+    }
+    
+    base_model = xgb.XGBClassifier(random_state=42, eval_metric='logloss')
+    
+    print("Running GridSearchCV with 5-Fold Time-Series Cross Validation...")
+    grid_search = GridSearchCV(
+        estimator=base_model,
+        param_grid=param_grid,
+        cv=tscv,
+        scoring='accuracy',
+        n_jobs=-1,
+        verbose=1
+    )
+    grid_search.fit(X, y)
+    
+    best_params = grid_search.best_params_
+    print("\nMathematically Optimal Hyperparameters Found:")
+    for k, v in best_params.items():
+        print(f"  - {k}: {v}")
 
-    # 5. Save the updated model
-    model.save_model("nvda_xgboost_model.json")
-    print("New model saved as 'nvda_xgboost_model.json'. Ready for live deployment.")
+    # 6. Evaluate Walk-Forward Performance across Folds using Optimal Parameters
+    print("\n==========================================")
+    print("WALK-FORWARD TIME-SERIES CROSS VALIDATION RESULTS")
+    print("==========================================")
+    fold_accuracies = []
+    fold_precisions = []
+    fold_recalls = []
+    fold_aucs = []
+
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X), 1):
+        X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
+        X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
+        
+        fold_model = xgb.XGBClassifier(**best_params, random_state=42, eval_metric='logloss')
+        fold_model.fit(X_tr, y_tr)
+        
+        val_preds = fold_model.predict(X_val)
+        val_probs = fold_model.predict_proba(X_val)[:, 1]
+        
+        acc = accuracy_score(y_val, val_preds)
+        prec = precision_score(y_val, val_preds, zero_division=0)
+        rec = recall_score(y_val, val_preds, zero_division=0)
+        auc = roc_auc_score(y_val, val_probs)
+        
+        fold_accuracies.append(acc)
+        fold_precisions.append(prec)
+        fold_recalls.append(rec)
+        fold_aucs.append(auc)
+        
+        train_start = X.index[train_idx[0]].strftime('%Y-%m-%d')
+        train_end = X.index[train_idx[-1]].strftime('%Y-%m-%d')
+        val_start = X.index[val_idx[0]].strftime('%Y-%m-%d')
+        val_end = X.index[val_idx[-1]].strftime('%Y-%m-%d')
+        
+        print(f"Fold {fold}: Train [{train_start} -> {train_end}] | Val [{val_start} -> {val_end}] | Accuracy: {acc*100:.2f}% | AUC: {auc:.4f}")
+
+    print(f"\nOverall Time-Series CV Accuracy: {np.mean(fold_accuracies)*100:.2f}% (+/- {np.std(fold_accuracies)*100:.2f}%)")
+    print(f"Overall Time-Series CV ROC-AUC:  {np.mean(fold_aucs):.4f}")
+
+    # 7. Retrain Best Model on Complete Dataset & Save
+    best_model = grid_search.best_estimator_
+    best_model.save_model("nvda_xgboost_model.json")
+    print("\nTuned model saved as 'nvda_xgboost_model.json'. Ready for live deployment.")

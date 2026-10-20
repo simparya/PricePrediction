@@ -23,26 +23,36 @@ model.load_model(MODEL_PATH)
 # 2. DEFINE STRATEGY
 # ==========================================
 class XGBoostBracketStrategy(Strategy):
-    tp_atr_mult = 2.0  # +2.0x ATR Take Profit
-    sl_atr_mult = 1.0  # -1.0x ATR Stop Loss
+    tp_atr_mult = 3.0  # +3.0x ATR Take Profit (2:1 Reward to Risk ratio)
+    sl_atr_mult = 1.5  # -1.5x ATR Stop Loss
+    confidence_threshold = 0.70  # Require strictly >= 70% model confidence to trade
+    risk_pct = 0.01  # Risk 1.0% of equity per trade
 
     def init(self):
-        # Pre-compute model predictions across the entire dataset for fast execution
+        # Pre-compute model probabilities across the entire dataset for fast execution
         X = self.data.df[FEATURES]
-        self.predictions = model.predict(X)
+        # predict_proba returns [prob_down, prob_up]
+        self.probabilities_up = model.predict_proba(X)[:, 1]
 
     def next(self):
-        # Get current bar index and prediction
+        # Get current bar index and probability
         i = len(self.data) - 1
-        prediction = self.predictions[i]
+        prob_up = self.probabilities_up[i]
+        prob_down = 1.0 - prob_up
         price = self.data.Close[-1]
 
         atr = self.data.df['ATR_14'].iloc[i] if 'ATR_14' in self.data.df.columns else (price * 0.02)
         sma_200 = self.data.df['SMA_200'].iloc[i] if 'SMA_200' in self.data.df.columns else price
         is_bull_market = (price >= sma_200)
 
-        # BUY Signal: Model predicts 1 and price is above 200-day SMA (Bull Regime)
-        if prediction == 1 and is_bull_market:
+        # Volatility-Adjusted Position Sizing: Risk 1% of equity / (1.5 * ATR)
+        equity = self.equity
+        dollar_risk = equity * self.risk_pct
+        stop_dist = max(0.01, self.sl_atr_mult * atr)
+        trade_size = max(1, int(dollar_risk / stop_dist))
+
+        # BUY Signal: Model confidence for UP >= 70% AND Bull Market Regime
+        if prob_up >= self.confidence_threshold and is_bull_market:
             if not self.position.is_long:
                 if self.position.is_short:
                     self.position.close()
@@ -50,10 +60,10 @@ class XGBoostBracketStrategy(Strategy):
                 sl_price = max(0.01, price - (self.sl_atr_mult * atr))
                 if sl_price >= price:
                     sl_price = price * 0.99
-                self.buy(sl=sl_price, tp=tp_price)
+                self.buy(size=trade_size, sl=sl_price, tp=tp_price)
 
-        # SELL Signal: Model predicts 0 and price is below 200-day SMA (Bear Regime)
-        elif prediction == 0 and not is_bull_market:
+        # SELL Signal: Model confidence for DOWN >= 70% (prob_up <= 0.30) AND Bear Market Regime
+        elif prob_down >= self.confidence_threshold and not is_bull_market:
             if not self.position.is_short:
                 if self.position.is_long:
                     self.position.close()
@@ -61,9 +71,9 @@ class XGBoostBracketStrategy(Strategy):
                 if tp_price >= price:
                     tp_price = price * 0.95
                 sl_price = price + (self.sl_atr_mult * atr)
-                self.sell(sl=sl_price, tp=tp_price)
+                self.sell(size=trade_size, sl=sl_price, tp=tp_price)
 
-        # Otherwise: Close position if signal conflicts with secular 200-day trend
+        # NO TRADE / HOLD Signal: Confidence below 70% or trend mismatch
         else:
             if self.position:
                 self.position.close()
