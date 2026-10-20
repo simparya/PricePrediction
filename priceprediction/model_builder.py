@@ -8,9 +8,9 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, brier_score_loss
 from xgboost import XGBClassifier
-from strategy import FEATURES, prepare
+from .strategy import FEATURES, prepare
 
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parent.parent
 
 
 def probability(bundle, frame):
@@ -95,7 +95,7 @@ def build(data, output, horizon=5):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--data',type=Path,default=ROOT/'NVDA_historical_features.csv')
+    parser.add_argument('--data',type=Path,default=ROOT/'data'/'NVDA_historical_features.csv')
     parser.add_argument('--output',type=Path,default=ROOT/'artifacts/strategy.joblib')
     parser.add_argument('--horizon',type=int,default=5)
     args=parser.parse_args()

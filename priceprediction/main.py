@@ -6,12 +6,12 @@ from datetime import datetime, timezone, timedelta
 import joblib
 import numpy as np
 import pandas as pd
-from strategy import FEATURES, prepare, plan, black_scholes
-from model_builder import probability
-from config import get_alpaca_credentials
-from utils import with_retry
+from .strategy import FEATURES, prepare, plan, black_scholes
+from .model_builder import probability
+from .config import get_alpaca_credentials
+from .utils import with_retry
 
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parent.parent
 
 
 def propose(bars,bundle,equity=10000.):
@@ -54,7 +54,7 @@ def fetch_bars(key,secret):
 
 
 def audit_decision(decision,db_path):
-    from db_manager import log_prediction
+    from .db_manager import log_prediction
     db_path=Path(db_path)
     db_path.parent.mkdir(parents=True,exist_ok=True)
     up=decision['probability_up']
@@ -90,9 +90,9 @@ if __name__=='__main__':
     audit_decision(decision,a.audit_db)
     print(json.dumps(decision,indent=2,allow_nan=False))
     if a.submit_paper:
-        from execution import execute
+        from .execution import execute
         print(execute(decision,key,secret,float(bars.close.iloc[-1]),bundle['horizon'],audit_path=a.audit_db))
     if a.notify:
-        from notifier import send_discord_alert, COLOR_BUY, COLOR_SELL, COLOR_INFO
+        from .notifier import send_discord_alert, COLOR_BUY, COLOR_SELL, COLOR_INFO
         color={'BUY':COLOR_BUY,'SELL':COLOR_SELL}.get(decision['action'],COLOR_INFO)
         send_discord_alert('NVDA strategy proposal',json.dumps(decision),color=color)

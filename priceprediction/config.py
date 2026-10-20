@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def get_alpaca_credentials() -> tuple[str, str]:
-    env_path = Path(__file__).resolve().with_name(".env")
+    env_path = Path(__file__).resolve().parent.parent / ".env"
     if env_path.is_file():
         with env_path.open(encoding="utf-8") as env_file:
             for line in env_file:

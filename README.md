@@ -12,21 +12,31 @@ Python 3.12 was used for validation. From this directory:
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
-python model_builder.py
-python backtester.py
-python main.py --data NVDA_historical_features.csv
-python -m unittest -v test_strategy test_execution test_integration
+python -m priceprediction.model_builder
+python -m priceprediction.backtester
+python -m priceprediction.main --data data/NVDA_historical_features.csv
+python -m unittest -v tests.test_strategy tests.test_execution tests.test_integration
 ```
 
 In the prepared cloud environment, activate
 `/workspace/priceprediction-venv/bin/activate` instead. Models, evaluation JSON,
 and trade CSVs are saved under ignored `artifacts/`. Only load trusted local
 joblib bundles: deserializing an untrusted bundle can execute code. The original
-`nvda_xgboost_model.json` and cached data remain unchanged.
+legacy model is in `models/nvda_xgboost_model.json`; cached data is in `data/`.
+
+## Project layout
+
+- `priceprediction/` contains the application package and command-line modules.
+- `tests/` contains the unit and integration tests.
+- `data/` contains the input datasets and retained historical audit database.
+- `models/` contains the supplied legacy model; generated models go in `artifacts/`.
+- `reports/` contains saved HTML reports.
+- `.env`, `requirements.txt`, and project configuration remain at the repository root.
 
 ## Signals and orders
 
-`strategy.py` computes the same features for training, backtesting and proposals:
+`priceprediction/strategy.py` computes the same features for training,
+backtesting and proposals:
 
 - Bullish/bearish/neutral regime from SMA50/SMA200 alignment, SMA50 slope,
   directional movement and ADX. This is a causal regime classification heuristic,
@@ -102,13 +112,13 @@ these results as investment evidence.
 ## Optional paper workflow
 
 Set `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` securely (or the existing
-`APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` names from `.env.example`), then run `python main.py`
-for a fresh-data proposal only. The old hardcoded keys have been removed from the
+`APCA_API_KEY_ID` / `APCA_API_SECRET_KEY` names from `.env.example`), then run
+`python -m priceprediction.main` for a fresh-data proposal. The old hardcoded keys have been removed from the
 Python files; rotate the previously exposed credentials, which remain in Git
 history. Do not commit credentials or `.env` files. No Hugging Face downloads or
 FinBERT initialization are needed for this price-only strategy.
 
-`python main.py --submit-paper` is an explicit paper-only execution command.
+`python -m priceprediction.main --submit-paper` is an explicit paper-only execution command.
 No real-money endpoint is supported. Run once each open-market session if enabled:
 this command also checks managed positions for the five-session time exit.
 It discards today's potentially incomplete candle and refuses stale signals,
@@ -128,13 +138,13 @@ its own validation data. Do not edit the bundle to bypass that result.
 
 The updated cached dataset, supplied model, credential configuration, SQLite audit
 module, notification module and retry/position-size utilities are retained.
-`config.py` loads either credential naming convention from the environment or a
+`priceprediction/config.py` loads either credential naming convention from the environment or a
 local `.env` file. Market-data reads use the existing retry helper; broker writes
 are not blindly retried. The strategy keeps its stricter position-size caps.
 
 Proposal audits and submitted-entry audits use `artifacts/trading_bot.db` by
 default (`--audit-db PATH` to change it), leaving the tracked historical
-`trading_bot.db` intact. Offline CSV proposals are logged locally too. Discord
+`data/trading_bot.db` intact. Offline CSV proposals are logged locally too. Discord
 alerts require explicit `--notify` plus a configured `DISCORD_WEBHOOK_URL`;
 normal evaluation and tests never send notifications. Paper broker paths have been tested with mocks only; Discord delivery has not
 been exercised.

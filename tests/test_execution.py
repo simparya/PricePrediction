@@ -1,9 +1,10 @@
 import unittest
+from contextlib import closing
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 import pandas as pd
 from alpaca.trading.enums import OrderSide
-from execution import execute
+from priceprediction.execution import execute
 
 
 class ExecutionTests(unittest.TestCase):
@@ -17,7 +18,7 @@ class ExecutionTests(unittest.TestCase):
         self.decision={'action':'BUY','signal_bar':'2026-07-13 04:00Z','stop':95.,'target':110.,'quantity':10}
 
     def test_paper_only_and_bracket_geometry(self):
-        with patch('execution.TradingClient',return_value=self.client) as ctor:
+        with patch('priceprediction.execution.TradingClient',return_value=self.client) as ctor:
             execute(self.decision,'test-key','test-secret',100.)
         ctor.assert_called_once_with('test-key','test-secret',paper=True)
         order=self.client.submit_order.call_args.kwargs['order_data']
@@ -33,21 +34,21 @@ class ExecutionTests(unittest.TestCase):
         decision={**self.decision,'probability_up':.8}
         with tempfile.TemporaryDirectory() as tmp:
             target=Path(tmp)/'audit.db'
-            with patch('execution.TradingClient',return_value=self.client):
+            with patch('priceprediction.execution.TradingClient',return_value=self.client):
                 execute(decision,'k','s',100.,audit_path=target)
-            with sqlite3.connect(target) as db:
+            with closing(sqlite3.connect(target)) as db, db:
                 record=db.execute('SELECT qty,alpaca_order_id,status FROM trades').fetchone()
             self.assertEqual(record,(10,'paper-order-123','SUBMITTED'))
 
     def test_duplicate_signal_is_not_resubmitted(self):
         self.client.get_orders.return_value=[NS(client_order_id='combined-NVDA-20260713-buy',filled_at=None)]
-        with patch('execution.TradingClient',return_value=self.client):
+        with patch('priceprediction.execution.TradingClient',return_value=self.client):
             self.assertIn('already processed',execute(self.decision,'k','s',100.))
         self.client.submit_order.assert_not_called()
 
     def test_unmanaged_position_is_preserved(self):
         self.client.get_all_positions.return_value=[NS(symbol='NVDA')]
-        with patch('execution.TradingClient',return_value=self.client):
+        with patch('priceprediction.execution.TradingClient',return_value=self.client):
             with self.assertRaisesRegex(RuntimeError,'Unmanaged'):
                 execute(self.decision,'k','s',100.)
         self.client.close_position.assert_not_called()
@@ -59,7 +60,7 @@ class ExecutionTests(unittest.TestCase):
         self.client.get_orders.side_effect=[[order],[],[]]
         self.client.get_all_positions.return_value=[NS(symbol='NVDA',side=NS(value='long'),qty='10')]
         self.client.get_calendar.return_value=list(range(6))
-        with patch('execution.TradingClient',return_value=self.client):
+        with patch('priceprediction.execution.TradingClient',return_value=self.client):
             self.assertIn('exit submitted',execute({'action':'WAIT'},'k','s',100.))
         self.client.close_position.assert_called_once_with('NVDA')
         self.client.submit_order.assert_not_called()

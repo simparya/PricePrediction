@@ -2,8 +2,8 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 import pandas as pd
-from strategy import prepare, FEATURES, black_scholes, simulate, plan
-from model_builder import threshold_search
+from priceprediction.strategy import prepare, FEATURES, black_scholes, simulate, plan
+from priceprediction.model_builder import threshold_search
 
 
 def bars(n=300):
@@ -50,7 +50,7 @@ class StrategyTests(unittest.TestCase):
         d=prepare(bars())
         idx=d.index[-1]
         d.loc[idx,['regime','candle','atr','resistance','volatility']]=[1,1,2,d.close.iloc[-1]-1,.3]
-        with patch('strategy.simulate',return_value={'profitable_probability':.7,'expected_net_return':.02}):
+        with patch('priceprediction.strategy.simulate',return_value={'profitable_probability':.7,'expected_net_return':.02}):
             decision=plan(d,.8,.6,10000)
         self.assertEqual(decision.action,'BUY')
         self.assertLess(decision.stop,d.close.iloc[-1])
@@ -77,8 +77,8 @@ class StrategyTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
         import joblib
-        from strategy import Decision
-        import backtester
+        from priceprediction.strategy import Decision
+        from priceprediction import backtester
         d=bars()
         start=d.index[240]
         calls=[]
@@ -91,7 +91,7 @@ class StrategyTests(unittest.TestCase):
             root=Path(tmp)
             d.to_csv(root/'data.csv')
             joblib.dump({'test_start':str(start),'horizon':5,'enabled':True,'threshold':.6},root/'bundle.joblib')
-            with patch('backtester.probability',side_effect=lambda b,f:np.full(len(f),.8)), patch('backtester.plan',side_effect=decision):
+            with patch('priceprediction.backtester.probability',side_effect=lambda b,f:np.full(len(f),.8)), patch('priceprediction.backtester.plan',side_effect=decision):
                 report=backtester.run(root/'data.csv',root/'bundle.joblib',root/'out')
             trades=pd.read_csv(root/'out/trades.csv')
             self.assertEqual(report['trades'],1)
@@ -100,7 +100,7 @@ class StrategyTests(unittest.TestCase):
             self.assertAlmostEqual(trades.EntryPrice.iloc[0],d.open.iloc[241])
 
     def test_no_import_time_trading_or_training(self):
-        import main, backtester, execution
+        from priceprediction import main, backtester, execution
         self.assertTrue(callable(main.propose))
 
 

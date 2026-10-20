@@ -6,10 +6,10 @@ import joblib
 import numpy as np
 import pandas as pd
 from backtesting import Backtest, Strategy
-from strategy import FEATURES, prepare, plan
-from model_builder import probability
+from .strategy import FEATURES, prepare, plan
+from .model_builder import probability
 
-ROOT=Path(__file__).resolve().parent
+ROOT=Path(__file__).resolve().parent.parent
 
 
 def run(data, bundle_path, output):
@@ -69,7 +69,7 @@ def run(data, bundle_path, output):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--data',type=Path,default=ROOT/'NVDA_historical_features.csv')
+    p.add_argument('--data',type=Path,default=ROOT/'data'/'NVDA_historical_features.csv')
     p.add_argument('--bundle',type=Path,default=ROOT/'artifacts/strategy.joblib')
     p.add_argument('--output',type=Path,default=ROOT/'artifacts')
     a=p.parse_args()
