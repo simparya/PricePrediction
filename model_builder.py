@@ -1,202 +1,102 @@
-import pandas as pd
+"""Offline, purged chronological training; never modifies the supplied model/data."""
+import argparse
+import json
+from pathlib import Path
+import joblib
 import numpy as np
-import xgboost as xgb
-from datetime import datetime, timedelta
-from tqdm import tqdm
-from transformers import pipeline
-from alpaca.data.historical import StockHistoricalDataClient, NewsClient
-from alpaca.data.requests import StockBarsRequest, NewsRequest
-from alpaca.data.timeframe import TimeFrame
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, brier_score_loss
+from xgboost import XGBClassifier
+from strategy import FEATURES, prepare
 
-# ==========================================
-# 1. INITIALIZATION
-# ==========================================
-API_KEY = 'PKH7VBANASKPY6VTXRL7HHTB63'
-SECRET_KEY ='71pqaHS8VBYi5kzrFJ22DqUfJBUGLibk5NsGPzPkRMWz'
-data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
-news_client = NewsClient(API_KEY, SECRET_KEY)
+ROOT=Path(__file__).resolve().parent
 
-SYMBOL = "NVDA"
-YEARS_OF_DATA = 10
 
-# Load FinBERT
-print("Loading FinBERT Sentiment Analyzer...")
-sentiment_analyzer = pipeline("text-classification", model="ProsusAI/finbert", device=-1) # Change device=0 if you have a GPU
+def probability(bundle, frame):
+    raw=np.clip(bundle['model'].predict_proba(frame[FEATURES])[:,1],1e-6,1-1e-6)
+    return bundle['calibrator'].predict_proba(np.log(raw/(1-raw)).reshape(-1,1))[:,1]
 
-# ==========================================
-# 2. FETCH HISTORICAL PRICE & TECHNICALS
-# ==========================================
-def build_technical_dataset():
-    print(f"Fetching historical bars for {SYMBOL} ({YEARS_OF_DATA} years)...")
-    start_date = datetime.now() - timedelta(days=365 * YEARS_OF_DATA)
-    
-    request_params = StockBarsRequest(
-        symbol_or_symbols=[SYMBOL],
-        timeframe=TimeFrame.Day,
-        start=start_date
-    )
-    
-    bars = data_client.get_stock_bars(request_params).df
-    if isinstance(bars.index, pd.MultiIndex):
-        bars = bars.xs(SYMBOL, level="symbol")
-        
-    # 1. Moving Averages & Stationary Relative Ratios
-    bars['SMA_10'] = bars['close'].rolling(window=10).mean()
-    bars['SMA_50'] = bars['close'].rolling(window=50).mean()
-    bars['SMA_200'] = bars['close'].rolling(window=200).mean()
-    
-    bars['SMA_10_Ratio'] = (bars['close'] / bars['SMA_10']) - 1.0
-    bars['SMA_50_Ratio'] = (bars['close'] / bars['SMA_50']) - 1.0
-    bars['SMA_200_Ratio'] = (bars['close'] / bars['SMA_200']) - 1.0
 
-    # 2. Momentum: RSI (Normalized 0.0 to 1.0)
-    change = bars['close'].diff()
-    rsi_raw = 100 - (100 / (1 + (change.mask(change < 0, 0.0).ewm(com=13, adjust=False).mean() / 
-                                        -change.mask(change > 0, 0.0).ewm(com=13, adjust=False).mean().replace(0, np.nan))))
-    bars['RSI_14'] = rsi_raw.fillna(50) / 100.0
+def threshold_search(y, p, regime, minimum=25):
+    """Validation directional precision with a Wilson lower confidence bound.
 
-    # 3. Volatility: ATR 14 & Percentage Volatility (ATR_Pct - Stationary)
-    high_low = bars['high'] - bars['low']
-    high_close = (bars['high'] - bars['close'].shift()).abs()
-    low_close = (bars['low'] - bars['close'].shift()).abs()
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    bars['ATR_14'] = true_range.rolling(14).mean()
-    bars['ATR_Pct'] = bars['ATR_14'] / bars['close']
+    Threshold selection is exploratory; the untouched test period is authoritative.
+    """
+    candidates=[]
+    for t in (.50,.55,.60,.65,.70,.75,.80):
+        take=((p>=t)&(regime==1))|((p<=1-t)&(regime==-1))
+        n=int(take.sum())
+        if n<minimum: continue
+        acc=float(((p[take]>=.5)==y[take]).mean())
+        z=1.96
+        lower=(acc+z*z/(2*n)-z*np.sqrt(acc*(1-acc)/n+z*z/(4*n*n)))/(1+z*z/n)
+        candidates.append({'threshold':t,'samples':n,'precision':acc,'wilson_lower':float(lower)})
+    eligible=[x for x in candidates if x['precision']>=.55 and x['wilson_lower']>.5]
+    best=max(eligible,key=lambda x:(x['wilson_lower'],x['samples'])) if eligible else None
+    return best,candidates
 
-    # 4. Volatility: Bollinger Bands (%B)
-    sma_20 = bars['close'].rolling(20).mean()
-    std_20 = bars['close'].rolling(20).std()
-    bb_upper = sma_20 + (2 * std_20)
-    bb_lower = sma_20 - (2 * std_20)
-    bars['BB_Pct'] = (bars['close'] - bb_lower) / ((bb_upper - bb_lower).replace(0, np.nan))
-    bars['BB_Pct'] = bars['BB_Pct'].fillna(0.5)
 
-    # 5. Volume: VWAP Ratio (Percentage Deviation)
-    bars['VWAP_Ratio'] = (bars['close'] / bars['vwap']) - 1.0
+def build(data, output, horizon=5):
+    if horizon<1: raise ValueError('Horizon must be positive')
+    raw=pd.read_csv(data,index_col=0,parse_dates=True).sort_index()
+    full=prepare(raw)
+    # Future prices are used ONLY as training/evaluation labels.
+    future=full.close.shift(-horizon)
+    full['label']=(future>full.close).astype(int)
+    full.loc[future.isna(),'label']=np.nan
+    d=full.dropna(subset=FEATURES+['label']).copy()
+    n=len(d)
+    a,b,c=int(n*.5),int(n*.7),int(n*.85)
+    if min(a-horizon,b-a-horizon,c-b-horizon,n-c)<40:
+        raise ValueError('Need more data for purged train/calibration/validation/test splits')
+    train,cal,val,test=d.iloc[:a-horizon],d.iloc[a:b-horizon],d.iloc[b:c-horizon],d.iloc[c:]
+    model=XGBClassifier(n_estimators=150,max_depth=3,learning_rate=.03,
+                        subsample=.8,colsample_bytree=.8,reg_lambda=5,
+                        random_state=42,n_jobs=2)
+    model.fit(train[FEATURES],train.label)
+    p=np.clip(model.predict_proba(cal[FEATURES])[:,1],1e-6,1-1e-6)
+    calibrator=LogisticRegression(C=1,random_state=42).fit(np.log(p/(1-p)).reshape(-1,1),cal.label)
+    bundle={'model':model,'calibrator':calibrator,'features':FEATURES,'horizon':horizon,
+            'test_start':str(test.index[0]), 'threshold':1., 'enabled':False}
+    pv=probability(bundle,val)
+    best,candidates=threshold_search(val.label.to_numpy(),pv,val.regime.to_numpy())
+    if best: bundle.update(threshold=best['threshold'],enabled=True)
+    pt=probability(bundle,test)
+    take=(((pt>=bundle['threshold'])&(test.regime==1))|((pt<=1-bundle['threshold'])&(test.regime==-1))) & bundle['enabled']
+    # Price-only baseline on identical splits, without new structure/regime features.
+    base_features=['sma10','sma50','sma200','rsi','atr_pct','volume_z']
+    baseline=XGBClassifier(n_estimators=150,max_depth=3,learning_rate=.03,random_state=42,n_jobs=2)
+    baseline.fit(train[base_features],train.label)
+    bp=baseline.predict_proba(test[base_features])[:,1]
+    report={'horizon_sessions':horizon,'rows':n,
+            'splits':{name:{'rows':len(part),'start':str(part.index[0]),'end':str(part.index[-1])}
+                      for name,part in [('train',train),('calibration',cal),('validation',val),('test',test)]},
+            'purge_sessions_at_each_boundary':horizon,'threshold_candidates':candidates,
+            'selected':best,'trading_enabled':bundle['enabled'],
+            'test':{'accuracy':float(accuracy_score(test.label,pt>=.5)),
+                    'brier':float(brier_score_loss(test.label,pt)),
+                    'baseline_accuracy':float(accuracy_score(test.label,bp>=.5)),
+                    'baseline_brier':float(brier_score_loss(test.label,bp)),
+                    'majority_class_accuracy':float(max(test.label.mean(),1-test.label.mean())),
+                    'qualified_directional_signals':int(take.sum()),
+                    'qualified_directional_precision':float(((pt[take]>=.5)==test.label[take]).mean()) if take.any() else None},
+            'limitations':['Overlapping five-day labels make signal observations dependent; Wilson bounds are heuristic.',
+                          'Cached OHLCV adjustment and timestamp provenance are not verified.',
+                          'No claim of improved future accuracy; test returns exclude funding/borrow fees.',
+                          'Black-Scholes uses historical volatility, zero rate/dividend; no market option quotes.']}
+    output=Path(output)
+    output.parent.mkdir(parents=True,exist_ok=True)
+    joblib.dump(bundle,output)
+    output.with_suffix('.report.json').write_text(json.dumps(report,indent=2))
+    print(json.dumps(report,indent=2))
+    return bundle,report
 
-    # 6. Volume: On-Balance Volume (OBV 20-day Z-Score)
-    obv_change = np.sign(bars['close'].diff()).fillna(0)
-    obv = (obv_change * bars['volume']).fillna(0).cumsum()
-    obv_mean = obv.rolling(20).mean()
-    obv_std = obv.rolling(20).std().replace(0, np.nan)
-    bars['OBV_Z'] = ((obv - obv_mean) / obv_std).fillna(0)
-    
-    # Target Variable: 1 if next day closes higher, 0 if lower
-    bars['Target'] = (bars['close'].shift(-1) > bars['close']).astype(int)
-    
-    return bars.dropna()
 
-# ==========================================
-# 3. FETCH & SCORE HISTORICAL SENTIMENT
-# ==========================================
-def build_sentiment_dataset(dates):
-    csv_file = f"{SYMBOL}_historical_features.csv"
-    try:
-        existing_df = pd.read_csv(csv_file, index_col=0, parse_dates=True)
-        if 'Sentiment_Score' in existing_df.columns and len(existing_df) > 0:
-            print("Found existing cached Sentiment_Score. Reusing cached news sentiment...")
-            existing_df.index = pd.to_datetime(existing_df.index)
-            sentiment_df = existing_df[['Sentiment_Score']].reindex(pd.to_datetime(dates), fill_value=0.0)
-            sentiment_df.index.name = 'Date'
-            return sentiment_df
-    except Exception as e:
-        print(f"Could not load cached sentiment: {e}")
-
-    print("Fetching and scoring historical news. This will take a while...")
-    sentiment_records = []
-    
-    # Iterate through unique dates in the technical dataset
-    for date in tqdm(dates, desc="Processing Daily Sentiment"):
-        # Create a 24-hour window for each trading day
-        start_time = pd.to_datetime(date).replace(hour=0, minute=0, second=0)
-        end_time = start_time + timedelta(days=1)
-        
-        try:
-            news_req = NewsRequest(
-                symbols=SYMBOL, 
-                start=start_time, 
-                end=end_time, 
-                limit=15
-            )
-            news_response = news_client.get_news(news_req)
-            
-            if hasattr(news_response, 'data'):
-                articles = news_response.data
-            elif hasattr(news_response, 'news'):
-                articles = news_response.news
-            else:
-                articles = []
-
-            if not articles:
-                sentiment_records.append({'Date': date, 'Sentiment_Score': 0.0})
-                continue
-
-            headlines = " ".join([article.headline for article in articles])
-            
-            # FinBERT limits input size to 512 tokens. Truncate if necessary.
-            sentiment_result = sentiment_analyzer(headlines[:1500])[0] 
-            
-            if sentiment_result['label'] == 'positive':
-                score = sentiment_result['score']
-            elif sentiment_result['label'] == 'negative':
-                score = -sentiment_result['score']
-            else:
-                score = 0.0
-                
-            sentiment_records.append({'Date': date, 'Sentiment_Score': score})
-            
-        except Exception as e:
-            sentiment_records.append({'Date': date, 'Sentiment_Score': 0.0})
-            
-    sentiment_df = pd.DataFrame(sentiment_records)
-    sentiment_df.set_index('Date', inplace=True)
-    return sentiment_df
-
-# ==========================================
-# 4. EXECUTE TRAINING PIPELINE
-# ==========================================
-if __name__ == "__main__":
-    # 1. Build Base Dataset
-    df_tech = build_technical_dataset()
-    
-    # 2. Build Sentiment Dataset
-    # We pass the index (dates) from the technical dataset to align them perfectly
-    df_sentiment = build_sentiment_dataset(df_tech.index)
-    
-    # 3. Merge Datasets
-    final_df = df_tech.join(df_sentiment)
-    final_df['Sentiment_Score'] = final_df['Sentiment_Score'].fillna(0.0)
-    
-    # Save to CSV so you don't have to re-run FinBERT during model tweaking
-    final_df.to_csv(f"{SYMBOL}_historical_features.csv")
-    print(f"\nData saved to {SYMBOL}_historical_features.csv")
-
-    # 4. Train XGBoost with stationary technical, volatility, volume, and sentiment features
-    features = [
-        'SMA_10_Ratio', 'SMA_50_Ratio', 'SMA_200_Ratio', 
-        'RSI_14', 'ATR_Pct', 'BB_Pct', 'VWAP_Ratio', 'OBV_Z', 'Sentiment_Score'
-    ]
-    
-    X = final_df[features]
-    y = final_df['Target']
-
-    # Sequential split (no shuffling) to prevent look-ahead bias
-    split_idx = int(len(final_df) * 0.8)
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-
-    print(f"\nTraining XGBoost model on {len(X_train)} days of data...")
-    model = xgb.XGBClassifier(
-        n_estimators=150,
-        learning_rate=0.03,
-        max_depth=4,
-        random_state=42
-    )
-    
-    model.fit(X_train, y_train)
-    accuracy = model.score(X_test, y_test)
-    print(f"Model Test Accuracy: {accuracy * 100:.2f}%")
-
-    # 5. Save the updated model
-    model.save_model("nvda_xgboost_model.json")
-    print("New model saved as 'nvda_xgboost_model.json'. Ready for live deployment.")
+if __name__=='__main__':
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data',type=Path,default=ROOT/'NVDA_historical_features.csv')
+    parser.add_argument('--output',type=Path,default=ROOT/'artifacts/strategy.joblib')
+    parser.add_argument('--horizon',type=int,default=5)
+    args=parser.parse_args()
+    build(args.data,args.output,args.horizon)
